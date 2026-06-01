@@ -59,10 +59,14 @@ def load_fix_prs() -> pd.DataFrame:
     Adds derived columns: month, is_agent, is_merged, hours_to_merge, period.
     """
     print("Loading fix PRs from HuggingFace ...")
-    df = pd.read_parquet(HF_FIX_PRS)
-
-    df = df[(df["type"] == "fix") & (df["state"] == "closed")].copy()
-    df = df[df["agent"] != "OpenAI_Codex"].copy()
+    df = pd.read_parquet(
+        HF_FIX_PRS,
+        filters=[
+            ("type",  "==", "fix"),
+            ("state", "==", "closed"),
+            ("agent", "!=", "OpenAI_Codex"),
+        ],
+    )
 
     df["created_at"]     = pd.to_datetime(df["created_at"], utc=True)
     df["merged_at"]      = pd.to_datetime(df["merged_at"],  utc=True, errors="coerce")
