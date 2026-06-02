@@ -1,2 +1,4 @@
 /.venv
 /.venv-1
+# Local data cache (large parquet files)
+.cache/*.parquet
