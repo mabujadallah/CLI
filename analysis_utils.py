@@ -96,6 +96,7 @@ THEME2_DIR  = RESULTS_DIR / "theme2_figures"
 THEME3_DIR  = RESULTS_DIR / "theme3_figures"
 THEME4_DIR  = RESULTS_DIR / "theme4_figures"   # longitudinal "evolution" study (NQ1-NQ3)
 THEME5_DIR  = RESULTS_DIR / "theme5_figures"   # fix-specific study (bug types, reverts)
+THEME6_DIR  = RESULTS_DIR / "theme6_figures"   # new findings: complexity, learning, patterns, overlap
 
 # v2 output directories: the same analysis restricted to the true AIDev repo set
 # (see load_aidev_repo_set). v1 dirs above hold the broad-collection results.
@@ -103,7 +104,7 @@ THEME1_DIR_V2 = RESULTS_DIR / "theme1_figures_v2"
 THEME2_DIR_V2 = RESULTS_DIR / "theme2_figures_v2"
 THEME3_DIR_V2 = RESULTS_DIR / "theme3_figures_v2"
 
-for _d in [THEME1_DIR, THEME2_DIR, THEME3_DIR, THEME4_DIR, THEME5_DIR,
+for _d in [THEME1_DIR, THEME2_DIR, THEME3_DIR, THEME4_DIR, THEME5_DIR, THEME6_DIR,
            THEME1_DIR_V2, THEME2_DIR_V2, THEME3_DIR_V2]:
     _d.mkdir(parents=True, exist_ok=True)
 
@@ -423,13 +424,19 @@ def set_plot_style() -> None:
     })
 
 
-def save_fig(fig: plt.Figure, name: str, folder: Path) -> Path:
-    """Save figure as PNG and close it."""
+def save_fig(fig: plt.Figure, name: str, folder: Path, show: bool = False) -> Path:
+    """
+    Save figure as PNG. By default closes it (headless). Pass show=True to also
+    render it inline (under %matplotlib inline) so it appears in the notebook.
+    """
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{name}.png"
     fig.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
     print(f"  -> Saved: {path}")
+    if show:
+        plt.show()      # renders inline; leaves the saved PNG on disk too
+    else:
+        plt.close(fig)
     return path
 
 
