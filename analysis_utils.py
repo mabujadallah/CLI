@@ -94,9 +94,53 @@ RESULTS_DIR = Path("results")
 THEME1_DIR  = RESULTS_DIR / "theme1_figures"
 THEME2_DIR  = RESULTS_DIR / "theme2_figures"
 THEME3_DIR  = RESULTS_DIR / "theme3_figures"
+THEME4_DIR  = RESULTS_DIR / "theme4_figures"   # longitudinal "evolution" study (NQ1-NQ3)
+THEME5_DIR  = RESULTS_DIR / "theme5_figures"   # fix-specific study (bug types, reverts)
 
-for _d in [THEME1_DIR, THEME2_DIR, THEME3_DIR]:
+# v2 output directories: the same analysis restricted to the true AIDev repo set
+# (see load_aidev_repo_set). v1 dirs above hold the broad-collection results.
+THEME1_DIR_V2 = RESULTS_DIR / "theme1_figures_v2"
+THEME2_DIR_V2 = RESULTS_DIR / "theme2_figures_v2"
+THEME3_DIR_V2 = RESULTS_DIR / "theme3_figures_v2"
+
+for _d in [THEME1_DIR, THEME2_DIR, THEME3_DIR, THEME4_DIR, THEME5_DIR,
+           THEME1_DIR_V2, THEME2_DIR_V2, THEME3_DIR_V2]:
     _d.mkdir(parents=True, exist_ok=True)
+
+
+# Path to the committed list of the true AIDev repositories (owner/name per row).
+AIDEV_REPOS_CSV = Path("aidev_repos.csv")
+_AIDEV_REPO_SET: set[str] | None = None
+
+
+def load_aidev_repo_set() -> set[str]:
+    """
+    Return the true AIDev repository set (owner/name), excluding OpenAI_Codex.
+
+    Reads the committed `aidev_repos.csv` (1,743 repos). Falls back to deriving the
+    set from the cached AIDev parquet (`.cache/aidev/pull_request.parquet`) if the CSV
+    is absent. Used by the v2 notebooks to restrict the analysis to AIDev's repos.
+    """
+    global _AIDEV_REPO_SET
+    if _AIDEV_REPO_SET is not None:
+        return _AIDEV_REPO_SET
+    if AIDEV_REPOS_CSV.exists():
+        _AIDEV_REPO_SET = set(pd.read_csv(AIDEV_REPOS_CSV)["repo"].dropna())
+    else:
+        aidev_pq = _CACHE_DIR / "aidev" / "pull_request.parquet"
+        pr = pd.read_parquet(aidev_pq, columns=["html_url", "agent"])
+        pr = pr[pr["agent"] != "OpenAI_Codex"]
+
+        def _repo_of(u):
+            try:
+                p = u.split("github.com/", 1)[1].split("/")
+                return f"{p[0]}/{p[1]}"
+            except Exception:
+                return None
+
+        _AIDEV_REPO_SET = set(pr["html_url"].map(_repo_of).dropna())
+    print(f"  AIDev repo set loaded: {len(_AIDEV_REPO_SET):,} repos")
+    return _AIDEV_REPO_SET
 
 
 # ── Data Loading ──────────────────────────────────────────────────────────────
@@ -104,6 +148,7 @@ for _d in [THEME1_DIR, THEME2_DIR, THEME3_DIR]:
 def load_fix_prs(
     *,
     restrict_to_aidev_repos: bool = False,
+    restrict_to_repos: set[str] | None = None,
     apply_survivorship_cutoff: bool = True,
 ) -> pd.DataFrame:
     """
@@ -116,9 +161,14 @@ def load_fix_prs(
     Parameters
     ----------
     restrict_to_aidev_repos:
-        When True, keep only PRs whose repo appears in the AIDev coverage set
-        (repos seen at or before AIDEV_END). Required for RQ8 so the temporal
-        comparison is on a fixed repo set, not a shifting denominator.
+        When True, keep only PRs whose repo appears in the AIDev *coverage proxy*
+        (repos seen in our data at or before AIDEV_END). Used by v1 RQ8 so the
+        temporal comparison is on a fixed repo set, not a shifting denominator.
+    restrict_to_repos:
+        Optional explicit repo set (owner/name). When given, keep only PRs whose
+        repo is in it. Used by the v2 notebooks to restrict to the *true* AIDev
+        repository set (see load_aidev_repo_set). Applied independently of, and in
+        addition to, restrict_to_aidev_repos.
     apply_survivorship_cutoff:
         When True (default), drop PRs created within SURVIVORSHIP_CUTOFF_DAYS of
         the most recent created_at. Recent months are otherwise biased toward
@@ -163,7 +213,14 @@ def load_fix_prs(
     if restrict_to_aidev_repos:
         before = len(df)
         df = df[df["repo"].isin(_AIDEV_REPOS)].copy()
-        print(f"  Restricted to AIDev repos: kept {len(df):,} of {before:,} PRs")
+        print(f"  Restricted to AIDev repos (proxy): kept {len(df):,} of {before:,} PRs")
+
+    if restrict_to_repos is not None:
+        before = len(df)
+        df = df[df["repo"].isin(restrict_to_repos)].copy()
+        n_repos = df["repo"].nunique()
+        print(f"  Restricted to {len(restrict_to_repos):,} given repos: kept {len(df):,} of "
+              f"{before:,} PRs across {n_repos:,} repos")
 
     n_agent = int(df["is_agent"].sum())
     n_human = int((~df["is_agent"]).sum())
@@ -312,6 +369,30 @@ def cliffs_delta(a: pd.Series, b: pd.Series) -> tuple[float, str]:
     return delta, mag
 
 
+def trend_test(values) -> tuple[float, float, str]:
+    """
+    Mann-Kendall-style monotonic trend test over an ordered (monthly) series.
+
+    Implemented as Kendall's tau between time order and the values. Returns
+    (tau, p, label) where label is 'increasing'/'decreasing'/'flat'. Used for NQ1
+    (does a quality metric trend up or down over the 15 months?). NaNs are dropped;
+    needs >= 3 points.
+    """
+    v = pd.Series(values).dropna().to_numpy()
+    if len(v) < 3:
+        return float("nan"), float("nan"), "n/a"
+    tau, p = sp_stats.kendalltau(np.arange(len(v)), v)
+    if not np.isfinite(p):
+        return float(tau), float("nan"), "flat"
+    if p < 0.05 and tau > 0:
+        label = "increasing"
+    elif p < 0.05 and tau < 0:
+        label = "decreasing"
+    else:
+        label = "flat"
+    return float(tau), float(p), label
+
+
 def bh_correct(pvals: list[float]) -> list[float]:
     """
     Benjamini-Hochberg FDR correction. Returns adjusted p-values in the input order.
@@ -412,6 +493,50 @@ _GEN_RE = re.compile(
     r"__generated__|\.generated\.|\.snap$|\.pb\.go$",
     re.IGNORECASE,
 )
+
+
+# Agent-instruction / configuration files developers add to steer coding agents.
+# Used by NQ3 (do developers change their instructions to agents over time?).
+_INSTRUCTION_RE = re.compile(
+    r"(^|/)CLAUDE\.md$|(^|/)AGENTS?\.md$|(^|/)GEMINI\.md$|"
+    r"(^|/)\.cursorrules$|(^|/)\.cursor/rules/|"
+    r"copilot-instructions\.md$|(^|/)\.github/copilot-instructions\.md$|"
+    r"(^|/)\.windsurfrules$|(^|/)\.clinerules|(^|/)\.aider\.conf\.ya?ml$|"
+    r"(^|/)\.continue/",
+    re.IGNORECASE,
+)
+
+
+# Coarse bug-type taxonomy from PR titles (first match wins). Rough by design — many
+# titles stay 'other' — but useful for "what KIND of bug does each group fix?" (Theme 5).
+BUG_CATEGORIES: dict[str, str] = {
+    "crash/error":      r"crash|error|exception|\bfail|traceback|fatal|segfault",
+    "null/undefined":   r"null|undefined|nonetype|\bnpe\b|none type",
+    "typo/format":      r"typo|spelling|format|lint|whitespace|indent",
+    "security":         r"security|vulnerab|\bcve\b|xss|injection|\bauth\b|csrf",
+    "memory/leak":      r"memory|leak|\boom\b|overflow",
+    "race/concurrency": r"race|deadlock|concurren|thread|\basync",
+    "regression":       r"regression|broke|broken|revert",
+    "build/ci":         r"build|compile|\bci\b|pipeline|dependenc|\bdeps\b|version",
+    "ui/display":       r"\bui\b|display|render|\bcss\b|layout|styling",
+}
+_BUG_RES = {c: re.compile(p, re.IGNORECASE) for c, p in BUG_CATEGORIES.items()}
+
+
+def classify_bug_type(title: str) -> str:
+    """Bucket a fix-PR title into a coarse bug type (first match wins), else 'other'."""
+    if not isinstance(title, str):
+        return "other"
+    for cat, rgx in _BUG_RES.items():
+        if rgx.search(title):
+            return cat
+    return "other"
+
+
+def is_instruction_file(filename: str) -> bool:
+    """True if the file is an agent-instruction/config file (CLAUDE.md, .cursorrules,
+    copilot-instructions.md, AGENTS.md, GEMINI.md, .windsurfrules, .clinerules, ...)."""
+    return isinstance(filename, str) and bool(_INSTRUCTION_RE.search(filename))
 
 
 def classify_file_role(filename: str) -> str:
